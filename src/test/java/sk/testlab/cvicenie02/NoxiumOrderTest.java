@@ -39,6 +39,8 @@ class NoxiumOrderTest {
     private static final String EXPECTED_SHIPPING = "17,39 zł";
     private static final String EXPECTED_PAYMENT = "9,99 zł";
     private static final String EXPECTED_TOTAL = "172,36 zł";
+    private static final String MELATONINA = "Liposomalna melatonina - Noxium";
+    private static final String ASHWAGANDHA = "Ashwagandha - Noxium";
 
     // Kontaktné údaje objednávky. E-mail sa dá zmeniť: mvn test -Dnoxium.email=...
     private static final String CUSTOMER_NAME = "Test Selenium";
@@ -90,6 +92,10 @@ class NoxiumOrderTest {
 
             step("Kontrola košíka");
             driver.get(BASE_URL + "koszyk/");
+            assertAll("Produkty a množstvá v košíku",
+                () -> assertEquals("1", cartAmount(MELATONINA), "Počet balení melatonínu."),
+                () -> assertEquals("1", cartAmount(ASHWAGANDHA), "Počet balení ashwagandhy.")
+            );
             assertEquals(EXPECTED_GOODS, TextChecks.normalizeSpaces(visible("recapFullPrice").getText()),
                 "Nesprávna suma za tovar v košíku.");
             click("buttonNextStep");
@@ -125,15 +131,26 @@ class NoxiumOrderTest {
 
             // ASSERT: potvrdenie objednávky.
             step("Overenie potvrdenia objednávky");
-            String pageText = driver.findElement(By.tagName("body")).getText();
+            wait.until(ExpectedConditions.urlContains("dziekujemy"));
+            String pageText = TextChecks.normalizeSpaces(driver.findElement(By.tagName("body")).getText());
+            // Číslo objednávky ukladáme PRED assertions, aby ostalo v dôkazoch aj pri chybe.
+            java.util.regex.Matcher number = java.util.regex.Pattern.compile("Numer\\s+(\\d+)").matcher(pageText);
+            String orderNumber = number.find() ? number.group(1) : "";
+            artifacts.write("order-id.txt", orderNumber + System.lineSeparator());
+            artifacts.put("order.id", orderNumber);
             artifacts.put("confirmation.url", driver.getCurrentUrl());
             artifacts.screenshot(driver, "order-confirmation.png");
-            assertTrue(driver.getCurrentUrl().contains("zamowienie"),
-                "Po odoslaní sa mala zobraziť stránka potvrdenia objednávky.");
-            assertTrue(pageText.contains(EXPECTED_TOTAL),
-                "Potvrdenie objednávky má obsahovať sumu " + EXPECTED_TOTAL + ".");
+            assertAll("Potvrdenie objednávky",
+                () -> assertTrue(orderNumber.matches("\\d{10}"), "Potvrdenie musí zobraziť 10-miestne číslo objednávky."),
+                () -> assertTrue(pageText.contains("Zamówienie zostało wysłane"), "Chýba správa o odoslaní objednávky."),
+                () -> assertTrue(pageText.contains("Kwota do zapłaty " + EXPECTED_TOTAL), "Nesprávna suma na potvrdení."),
+                () -> assertTrue(pageText.contains("InPost Paczkomaty i punkty odbioru"), "Chýba zvolená doprava."),
+                () -> assertTrue(pageText.contains("Płatność przy odbiorze"), "Chýba zvolená platba."),
+                () -> assertTrue(pageText.contains(MELATONINA + " 1 paczki / 79,99 zł"), "Melatonín: názov, množstvo alebo cena."),
+                () -> assertTrue(pageText.contains(ASHWAGANDHA + " 1 paczki / 64,99 zł"), "Ashwagandha: názov, množstvo alebo cena.")
+            );
             artifacts.put("gui.assertions", "PASSED");
-            System.out.println("Objednávka odoslaná: " + driver.getCurrentUrl() + " | " + EXPECTED_TOTAL
+            System.out.println("Objednávka odoslaná: " + orderNumber + " | " + EXPECTED_TOTAL
                 + " | treba ju stornovať v administrácii");
         } catch (RuntimeException | AssertionError error) {
             primaryFailure = error;
@@ -159,6 +176,10 @@ class NoxiumOrderTest {
     private void addFromDetail(String path, String expectedHeaderTotal) {
         driver.get(BASE_URL + path);
         WebElement form = visible("formProduct");
+        // Príprava dát: produkt musí byť dostupný.
+        String availability = TextChecks.normalizeSpaces(wait.until(ExpectedConditions.presenceOfElementLocated(
+            testId("labelAvailability"))).getDomProperty("textContent")).trim();
+        assertEquals("Dostępne", availability, "Produkt " + path + " nie je dostupný.");
         WebElement button = form.findElement(testId("buttonAddToCart"));
         clickBelowFold(button);
         wait.until(d -> headerCartPrice().equals(expectedHeaderTotal));
@@ -211,6 +232,13 @@ class NoxiumOrderTest {
     private String headerCartPrice() {
         WebElement price = wait.until(ExpectedConditions.presenceOfElementLocated(testId("headerCartPrice")));
         return TextChecks.normalizeSpaces(price.getDomProperty("textContent")).trim();
+    }
+
+    // Množstvo v riadku košíka s daným názvom produktu.
+    private String cartAmount(String productName) {
+        return wait.until(ExpectedConditions.presenceOfElementLocated(By.xpath(
+            "//tr[.//*[@data-testid='cartProductName' and normalize-space()='" + productName + "']]"
+                + "//input[@data-testid='cartAmount']"))).getDomProperty("value");
     }
 
     private boolean recapContains(String text) {
