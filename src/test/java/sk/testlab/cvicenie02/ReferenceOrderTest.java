@@ -155,6 +155,120 @@ class ReferenceOrderTest {
         }
     }
 
+    @Test
+    @DisplayName("CAM-001 × 1 + USB-001 × 1 + MS-001 × 1, STUDENT10, osobný odber → 82,26 € a created")
+    void pickupOrder() {
+        // Očakávania vypočítané ručne podľa ACCEPTANCE.md:
+        // medzisúčet 5900 + 1250 + 1990 = 9140; zľava 10 % = 914; osobný odber = 0;
+        // spolu 8226.
+        final String expectedSubtotalCents = "9140";
+        final String expectedDiscountCents = "914";
+        final String expectedShippingCents = "0";
+        final String expectedTotalCents = "8226";
+        final String expectedVisibleTotal = "82,26 €";
+        try {
+            // ARRANGE: prihlásenie, prázdny košík a dostatočný sklad.
+            step("Prihlásenie do izolovaného pracovného priestoru");
+            driver.get(config.baseUrl);
+            click("nav-login");
+            type("login-email", config.email);
+            type("login-password", config.password);
+            click("login-submit");
+            visible("current-user");
+            visible("catalog-ready");
+
+            click("nav-cart");
+            assertTrue(visible("cart-empty").isDisplayed(), "Pred testom musí byť košík prázdny.");
+            click("nav-catalog");
+            visible("catalog-ready");
+            assertTrue(Integer.parseInt(visible("stock-CAM-001").getDomAttribute("data-stock")) >= 1,
+                    "Príprava dát: potrebujeme aspoň 1 webovú kameru CAM-001.");
+            assertTrue(Integer.parseInt(visible("stock-USB-001").getDomAttribute("data-stock")) >= 1,
+                    "Príprava dát: potrebujeme aspoň 1 USB-C kábel USB-001.");
+            assertTrue(Integer.parseInt(visible("stock-MS-001").getDomAttribute("data-stock")) >= 1,
+                    "Príprava dát: potrebujeme aspoň 1 myš MS-001.");
+
+            // ACT: výber produktov, osobný odber a kupón.
+            step("Výber produktov a osobného odberu");
+            click("add-to-cart-CAM-001");
+            wait.until(ExpectedConditions.textToBe(testId("cart-count"), "1"));
+            click("add-to-cart-USB-001");
+            wait.until(ExpectedConditions.textToBe(testId("cart-count"), "2"));
+            click("add-to-cart-MS-001");
+            wait.until(ExpectedConditions.textToBe(testId("cart-count"), "3"));
+            click("nav-cart");
+            assertEquals("1", visible("quantity-CAM-001").getDomProperty("value"));
+            assertEquals("1", visible("quantity-USB-001").getDomProperty("value"));
+            assertEquals("1", visible("quantity-MS-001").getDomProperty("value"));
+
+            // Zmena doručenia spustí nový prepočet; počkáme, kým sa starý súhrn nahradí
+            // novým.
+            WebElement courierQuote = visible("quote-total");
+            new Select(visible("delivery-method")).selectByValue("pickup");
+            wait.until(ExpectedConditions.stalenessOf(courierQuote));
+
+            step("Uplatnenie kupónu STUDENT10");
+            WebElement pickupQuote = visible("quote-total");
+            type("coupon-input", "STUDENT10");
+            click("coupon-apply");
+            wait.until(ExpectedConditions.stalenessOf(pickupQuote));
+            visible("quote-total");
+            click("proceed-checkout");
+
+            // Pri osobnom odbere formulár adresu nevyžaduje ani nezobrazuje.
+            step("Vyplnenie kontaktných údajov bez adresy");
+            visible("checkout-form");
+            assertTrue(driver.findElements(testId("customer-address")).isEmpty(),
+                    "Pri osobnom odbere sa pole adresy nemá zobraziť.");
+            type("customer-name", "Študent Testovací");
+            type("customer-email", "objednavka@example.test");
+            type("order-note", "Cvičenie 02 – osobný odber; beh " + artifacts.runId);
+            click("accept-terms");
+
+            step("Vytvorenie objednávky");
+            WebElement placeOrder = wait.until(ExpectedConditions.elementToBeClickable(testId("place-order")));
+            orderSubmitAttempted = true;
+            placeOrder.click(); // IBA RAZ.
+
+            createdOrderId = visible("order-id").getText().trim();
+            saveOrderId();
+            WebElement total = visible("order-total");
+            String actualCents = total.getDomAttribute("data-cents");
+            String actualVisible = TextChecks.normalizeSpaces(total.getText());
+            String actualStatus = visible("order-status").getDomAttribute("data-status");
+            artifacts.put("observed.total.cents", actualCents);
+            artifacts.put("observed.total.text", actualVisible);
+            artifacts.put("observed.status.before.cleanup", actualStatus);
+
+            // ASSERT: porovnanie so špecifikáciou.
+            step("Explicitné overenie výsledku objednávky");
+            assertAll("Objednávka s osobným odberom podľa ACCEPTANCE.md",
+                    () -> assertTrue(TextChecks.isCanonicalUuid(createdOrderId),
+                            "GUI musí zobraziť platné UUID objednávky."),
+                    () -> assertEquals(expectedSubtotalCents, visible("order-subtotal").getDomAttribute("data-cents"),
+                            "Nesprávny medzisúčet."),
+                    () -> assertEquals(expectedDiscountCents, visible("order-discount").getDomAttribute("data-cents"),
+                            "Nesprávna zľava."),
+                    () -> assertEquals(expectedShippingCents, visible("order-shipping").getDomAttribute("data-cents"),
+                            "Osobný odber musí byť zadarmo."),
+                    () -> assertEquals(expectedTotalCents, actualCents, "Nesprávna suma v centoch."),
+                    () -> assertEquals(expectedVisibleTotal, actualVisible, "Nesprávna viditeľná suma alebo mena."),
+                    () -> assertEquals(EXPECTED_STATUS, actualStatus, "Nová objednávka musí mať stav created."),
+                    () -> assertEquals("1", visible("order-quantity-CAM-001").getText().trim(),
+                            "Počet webových kamier."),
+                    () -> assertEquals("1", visible("order-quantity-USB-001").getText().trim(), "Počet USB-C káblov."),
+                    () -> assertEquals("1", visible("order-quantity-MS-001").getText().trim(),
+                            "Počet bezdrôtových myší."));
+            artifacts.screenshot(driver, "passed-before-cleanup.png");
+            artifacts.put("gui.assertions", "PASSED");
+            System.out.println("Overená objednávka: " + createdOrderId + " | 8226 centov | created");
+        } catch (RuntimeException | AssertionError error) {
+            primaryFailure = error;
+            artifacts.failure(driver, "failure", error);
+            throw error;
+        }
+    }
+
     @AfterEach
     void cleanUpAndCloseBrowser() {
         Throwable teardownFailure = null;

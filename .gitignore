@@ -38,3 +38,5 @@ build/
 ### Mac OS ###
 .DS_Store
 .idea
+### Lokálna konfigurácia testov (heslá) ###
+config/test.properties
