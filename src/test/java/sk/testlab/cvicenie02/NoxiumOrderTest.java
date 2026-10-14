@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.openqa.selenium.By;
 import org.openqa.selenium.Dimension;
-import org.openqa.selenium.Keys;
+import org.openqa.selenium.ElementClickInterceptedException;
+import org.openqa.selenium.JavascriptExecutor;
+import org.openqa.selenium.TimeoutException;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
 import org.openqa.selenium.support.ui.ExpectedConditions;
@@ -78,7 +80,7 @@ class NoxiumOrderTest {
             step("Otvorenie obchodu a odmietnutie cookies");
             driver.get(BASE_URL);
             click("buttonCookiesReject");
-            assertEquals("0,00 zł", TextChecks.normalizeSpaces(visible("headerCartPrice").getText()),
+            assertEquals("0,00 zł", headerCartPrice(),
                 "Pred testom musí byť košík prázdny.");
 
             // ACT: pridanie produktov z detailu.
@@ -157,42 +159,63 @@ class NoxiumOrderTest {
     private void addFromDetail(String path, String expectedHeaderTotal) {
         driver.get(BASE_URL + path);
         WebElement form = visible("formProduct");
-        wait.until(ExpectedConditions.elementToBeClickable(form.findElement(testId("buttonAddToCart")))).click();
-        wait.until(ExpectedConditions.textToBePresentInElementLocated(testId("headerCartPrice"), expectedHeaderTotal));
+        WebElement button = form.findElement(testId("buttonAddToCart"));
+        clickBelowFold(button);
+        wait.until(d -> headerCartPrice().equals(expectedHeaderTotal));
+    }
+
+    // Tlačidlo je pod okrajom okna a stránka sa pri bežnom posune vracia hore.
+    // Najprv skúsime posun a normálny klik, pri zakrytí klikneme priamo cez JavaScript.
+    private void clickBelowFold(WebElement element) {
+        JavascriptExecutor js = (JavascriptExecutor) driver;
+        js.executeScript("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", element);
+        wait.until(ExpectedConditions.elementToBeClickable(element));
+        try {
+            element.click();
+        } catch (ElementClickInterceptedException intercepted) {
+            js.executeScript("arguments[0].click();", element);
+        }
     }
 
     // Výber výdajného miesta v okne Packeta (iframe s id packeta-widget).
     private void choosePacketaPoint() {
-        WebElement link = wait.until(ExpectedConditions.elementToBeClickable(
-            By.cssSelector("[data-testid='deliveryPoint'] a")));
-        link.click();
-        wait.until(ExpectedConditions.frameToBeAvailableAndSwitchToIt(By.id("packeta-widget")));
+        clickBelowFold(wait.until(ExpectedConditions.presenceOfElementLocated(
+            By.cssSelector("[data-testid='deliveryPoint'] a"))));
+        wait.until(ExpectedConditions.frameToBeAvailableAndSwitchToIt(By.cssSelector("iframe#packeta-widget")));
         try {
-            // Okno má vlastný cookie banner.
-            By deny = By.xpath("//button[normalize-space()='Deny' or normalize-space()='Odrzuć']");
-            if (!driver.findElements(deny).isEmpty()) wait.until(ExpectedConditions.elementToBeClickable(deny)).click();
+            // Okno má vlastnú cookie lištu, ktorá sa ukáže až o chvíľu neskôr.
+            By deny = By.xpath("//*[self::button or self::a][normalize-space()='Deny' or normalize-space()='Odrzuć']");
+            try {
+                new WebDriverWait(driver, Duration.ofSeconds(8)).until(ExpectedConditions.elementToBeClickable(deny)).click();
+                wait.until(ExpectedConditions.invisibilityOfElementLocated(deny));
+            } catch (TimeoutException noBanner) {
+                // Lišta sa neukázala, pokračujeme.
+            }
 
-            WebElement search = wait.until(ExpectedConditions.elementToBeClickable(By.cssSelector("input")));
-            search.sendKeys("Warszawa");
-            wait.until(ExpectedConditions.elementToBeClickable(
-                By.xpath("//*[contains(normalize-space(), 'Warszawa') and contains(normalize-space(), 'Polska')]")));
-            search.sendKeys(Keys.ENTER);
-
-            // Prvý Paczkomat v zozname, potom potvrdenie výberu.
+            // Prvý Paczkomat v zozname najbližších miest, potom potvrdenie výberu.
             wait.until(ExpectedConditions.elementToBeClickable(
                 By.xpath("(//*[normalize-space()='Pl Paczkomaty'])[1]"))).click();
+            artifacts.write("packeta-after-point.html", driver.getPageSource());
             wait.until(ExpectedConditions.elementToBeClickable(
-                By.xpath("//button[contains(normalize-space(), 'Wybierz')]"))).click();
+                By.xpath("//button[contains(translate(normalize-space(), 'WYBIERZ', 'wybierz'), 'wybierz')]"))).click();
         } finally {
             driver.switchTo().defaultContent();
         }
+        // Počkáme, kým sa okno Packeta zatvorí.
+        wait.until(ExpectedConditions.invisibilityOfElementLocated(By.cssSelector("div#packeta-widget")));
         // Shoptet si uloží zvolené miesto do skrytého poľa.
         wait.until(d -> !d.findElement(By.name("shippingMethodBranch[76]")).getDomProperty("value").isBlank());
     }
 
+    // Suma v hlavičke je na počítači skrytá (vidno len ikonu košíka), preto čítame textContent.
+    private String headerCartPrice() {
+        WebElement price = wait.until(ExpectedConditions.presenceOfElementLocated(testId("headerCartPrice")));
+        return TextChecks.normalizeSpaces(price.getDomProperty("textContent")).trim();
+    }
+
     private boolean recapContains(String text) {
         return driver.findElements(testId("recapDeliveryMethod")).stream()
-            .anyMatch(e -> TextChecks.normalizeSpaces(e.getText()).contains(text));
+            .anyMatch(e -> TextChecks.normalizeSpaces(e.getDomProperty("textContent")).contains(text));
     }
 
     private void step(String message) {
@@ -202,9 +225,15 @@ class NoxiumOrderTest {
 
     private static By testId(String id) { return By.cssSelector("[data-testid='" + id + "']"); }
     private WebElement visible(String id) { return wait.until(ExpectedConditions.visibilityOfElementLocated(testId(id))); }
-    private void click(String id) { wait.until(ExpectedConditions.elementToBeClickable(testId(id))).click(); }
+    private void click(String id) {
+        clickBelowFold(wait.until(ExpectedConditions.presenceOfElementLocated(testId(id))));
+    }
+
+    // Rovnaký názov môže mať aj skryté pole (napr. prihlásenie v hlavičke), berieme viditeľné.
     private void typeByName(String name, String value) {
-        WebElement input = wait.until(ExpectedConditions.elementToBeClickable(By.name(name)));
+        WebElement input = wait.until(d -> d.findElements(By.name(name)).stream()
+            .filter(WebElement::isDisplayed).findFirst().orElse(null));
+        ((JavascriptExecutor) driver).executeScript("arguments[0].scrollIntoView({block: 'center', behavior: 'instant'});", input);
         input.clear();
         input.sendKeys(value);
     }
